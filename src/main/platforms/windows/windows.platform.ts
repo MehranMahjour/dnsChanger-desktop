@@ -124,45 +124,95 @@ export class WindowsPlatform extends Platform {
 		}
 	}
 
-	private async getValidateInterface() {
-        try {
-            const interfaces: Interface[] = await this.getInterfacesList()
-            
-            // 1. Get all interfaces that actually have a gateway assigned
-            const activeInterfaces = interfaces.filter(
-                (inter: Interface) => inter.gateway_ip != null
-            )
+	private async getDefaultRouteInterfaceName(): Promise<string | null> {
+	try {
+		// 1. Build a map of interface index -> interface name
+		const ifaceOutput = (await this.execCmd(
+			'netsh interface ipv4 show interfaces',
+		)) as string
 
-            if (activeInterfaces.length === 0) throw new Error('CONNECTION_FAILED')
+		const idxToName: Record<string, string> = {}
+		const ifaceLineRegex = /^\s*(\d+)\s+\d+\s+\d+\s+\S+\s+(.+?)\s*$/gm
+		let ifaceMatch: RegExpExecArray | null
+		while ((ifaceMatch = ifaceLineRegex.exec(ifaceOutput)) !== null) {
+			const [, idx, name] = ifaceMatch
+			idxToName[idx] = name
+		}
 
-            // 2. Filter out known virtual and VPN adapters
-            const physicalInterfaces = activeInterfaces.filter((inter: Interface) => {
-                const lowerName = inter.name.toLowerCase()
-                return (
-                    !lowerName.includes('vmware') &&
-                    !lowerName.includes('virtual') &&
-                    !lowerName.includes('vethernet') &&
-                    !lowerName.includes('wsl') &&
-                    !lowerName.includes('loopback') &&
-                    !lowerName.includes('vpn') &&
-                    !lowerName.includes('tun')
-                )
-            })
+		// 2. Find the 0.0.0.0/0 route(s) and pick the lowest metric (Windows' actual preference)
+		const routeOutput = (await this.execCmd(
+			'netsh interface ipv4 show route',
+		)) as string
 
-            // Fallback to activeInterfaces if physicalInterfaces is empty (prevents crashing)
-            const validInterfaces = physicalInterfaces.length > 0 ? physicalInterfaces : activeInterfaces
+		let bestMetric = Infinity
+		let bestIdx: string | null = null
+		const routeLineRegex = /^\S+\s+\S+\s+(\d+)\s+0\.0\.0\.0\/0\s+(\d+)\s+/gm
+		let routeMatch: RegExpExecArray | null
+		while ((routeMatch = routeLineRegex.exec(routeOutput)) !== null) {
+			const [, metricStr, idx] = routeMatch
+			const metric = parseInt(metricStr, 10)
+			if (metric < bestMetric) {
+				bestMetric = metric
+				bestIdx = idx
+			}
+		}
 
-            // 3. Prioritize Ethernet/Tethering over Wi-Fi if both have a ghost gateway
-            const tetheringInterface = validInterfaces.find(
-                (inter: Interface) => inter.name.toLowerCase().includes('ethernet')
-            )
+		if (bestIdx && idxToName[bestIdx]) {
+			return idxToName[bestIdx]
+		}
+		return null
+	} catch {
+		return null
+	}
+}
 
-            // 4. Return Tethering first, otherwise fallback to whatever physical connection is left
-            return tetheringInterface || validInterfaces[0]
-        } catch (error) {
-            throw error
-        }
-    }
+private async getValidateInterface() {
+	try {
+		const interfaces: Interface[] = await this.getInterfacesList()
+
+		// 0. Ask Windows directly which interface owns the default route.
+		// This is authoritative and doesn't depend on "show config" printing
+		// a Gateway line, which tethered adapters often skip.
+		const defaultRouteName = await this.getDefaultRouteInterfaceName()
+		if (defaultRouteName) {
+			const matched = interfaces.find(
+				(inter) => inter.name === defaultRouteName,
+			)
+			if (matched) return matched
+		}
+
+		// 1. Fallback: previous heuristic based on gateway_ip presence
+		const activeInterfaces = interfaces.filter(
+			(inter: Interface) => inter.gateway_ip != null,
+		)
+
+		if (activeInterfaces.length === 0) throw new Error('CONNECTION_FAILED')
+
+		const physicalInterfaces = activeInterfaces.filter((inter: Interface) => {
+			const lowerName = inter.name.toLowerCase()
+			return (
+				!lowerName.includes('vmware') &&
+				!lowerName.includes('virtual') &&
+				!lowerName.includes('vethernet') &&
+				!lowerName.includes('wsl') &&
+				!lowerName.includes('loopback') &&
+				!lowerName.includes('vpn') &&
+				!lowerName.includes('tun')
+			)
+		})
+
+		const validInterfaces =
+			physicalInterfaces.length > 0 ? physicalInterfaces : activeInterfaces
+
+		const tetheringInterface = validInterfaces.find((inter: Interface) =>
+			inter.name.toLowerCase().includes('ethernet'),
+		)
+
+		return tetheringInterface || validInterfaces[0]
+	} catch (error) {
+		throw error
+	}
+}
 
 	private extractDns(input: string): Array<string> {
 		const regex = /Statically Configured DNS Servers:\s+([\d.]+)\s+([\d.]+)/gm
