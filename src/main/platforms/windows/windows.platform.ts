@@ -125,18 +125,34 @@ export class WindowsPlatform extends Platform {
 	}
 
 	private async getValidateInterface() {
-		try {
-			const interfaces: Interface[] = await this.getInterfacesList()
-			const activeInterface: Interface | null = interfaces.find(
-				(inter: Interface) => inter.gateway_ip != null,
-			)
+        try {
+            const interfaces: Interface[] = await this.getInterfacesList()
+            
+            // 1. Get all interfaces that actually have a gateway assigned
+            const activeInterfaces = interfaces.filter(
+                (inter: Interface) => inter.gateway_ip != null
+            )
 
-			if (!activeInterface) throw new Error('CONNECTION_FAILED')
-			return activeInterface
-		} catch (error) {
-			throw error
-		}
-	}
+            if (activeInterfaces.length === 0) throw new Error('CONNECTION_FAILED')
+
+            // 2. Prioritize physical/tethered adapters by filtering out known virtual ones
+            const realInterface = activeInterfaces.find((inter: Interface) => {
+                const lowerName = inter.name.toLowerCase()
+                return (
+                    !lowerName.includes('vmware') &&
+                    !lowerName.includes('virtual') &&
+                    !lowerName.includes('vethernet') &&
+                    !lowerName.includes('wsl') &&
+                    !lowerName.includes('loopback')
+                )
+            })
+
+            // 3. Return the real physical interface if found, otherwise fallback to the first active one
+            return realInterface || activeInterfaces[0]
+        } catch (error) {
+            throw error
+        }
+    }
 
 	private extractDns(input: string): Array<string> {
 		const regex = /Statically Configured DNS Servers:\s+([\d.]+)\s+([\d.]+)/gm
