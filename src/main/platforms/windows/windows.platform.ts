@@ -135,20 +135,30 @@ export class WindowsPlatform extends Platform {
 
             if (activeInterfaces.length === 0) throw new Error('CONNECTION_FAILED')
 
-            // 2. Prioritize physical/tethered adapters by filtering out known virtual ones
-            const realInterface = activeInterfaces.find((inter: Interface) => {
+            // 2. Filter out known virtual and VPN adapters
+            const physicalInterfaces = activeInterfaces.filter((inter: Interface) => {
                 const lowerName = inter.name.toLowerCase()
                 return (
                     !lowerName.includes('vmware') &&
                     !lowerName.includes('virtual') &&
                     !lowerName.includes('vethernet') &&
                     !lowerName.includes('wsl') &&
-                    !lowerName.includes('loopback')
+                    !lowerName.includes('loopback') &&
+                    !lowerName.includes('vpn') &&
+                    !lowerName.includes('tun')
                 )
             })
 
-            // 3. Return the real physical interface if found, otherwise fallback to the first active one
-            return realInterface || activeInterfaces[0]
+            // Fallback to activeInterfaces if physicalInterfaces is empty (prevents crashing)
+            const validInterfaces = physicalInterfaces.length > 0 ? physicalInterfaces : activeInterfaces
+
+            // 3. Prioritize Ethernet/Tethering over Wi-Fi if both have a ghost gateway
+            const tetheringInterface = validInterfaces.find(
+                (inter: Interface) => inter.name.toLowerCase().includes('ethernet')
+            )
+
+            // 4. Return Tethering first, otherwise fallback to whatever physical connection is left
+            return tetheringInterface || validInterfaces[0]
         } catch (error) {
             throw error
         }
